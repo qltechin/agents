@@ -98,15 +98,17 @@ class CodexAuthManager:
 class CodexAuthContext:
     """Context manager for Codex auth setup and teardown."""
 
-    def __init__(self, cleanup_on_exit: bool = True):
+    def __init__(self, cleanup_on_exit: bool = True, build_id: str | None = None):
         """
         Initialize the context manager.
 
         Args:
             cleanup_on_exit: Whether to remove auth.json after execution
+            build_id: Optional build identifier (e.g., CodeBuild build ID) for logging
         """
         self.manager = CodexAuthManager()
         self.cleanup_on_exit = cleanup_on_exit
+        self.build_id = build_id
 
     def __enter__(self) -> "CodexAuthContext":
         """Set up Codex auth."""
