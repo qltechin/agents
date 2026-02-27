@@ -1,0 +1,65 @@
+name: Trigger Builder on aibuild Label
+
+# Triggers the Builder Agent immediately when 'aibuild' label is added to an issue.
+# This provides instant response vs waiting for the hourly ai-queue-sync.
+#
+# IMPORTANT: This workflow must exist in BOTH repos:
+#   - qltechin/agents  (this file)
+#   - qltechin/app     (copy this file there too)
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  trigger-builder:
+    name: Trigger Builder Agent
+    runs-on: ubuntu-latest
+    if: github.event.label.name == 'aibuild'
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ vars.GH_OWNER }}
+
+      - name: Trigger Builder Agent Workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const issue = context.payload.issue;
+            const repo = context.repo;
+            const ghOwner = '${{ vars.GH_OWNER }}';
+            const agentsRepo = '${{ vars.GH_AGENTS_REPO_NAME }}';
+
+            console.log(`aibuild label added to ${repo.owner}/${repo.repo}#${issue.number}`);
+            console.log(`Dispatching to ${ghOwner}/${agentsRepo}`);
+
+            // Trigger the builder agent workflow in the agents repo
+            await github.rest.actions.createWorkflowDispatch({
+              owner: ghOwner,
+              repo: agentsRepo,
+              workflow_id: 'on-demand-agent.yml',
+              ref: 'main',
+              inputs: {
+                agent: 'builder',
+                issue_number: String(issue.number),
+                target_repo: `${repo.owner}/${repo.repo}`,
+                max_issues: '1',
+                verbose: 'true'
+              }
+            });
+
+            console.log(`Builder Agent workflow triggered for issue #${issue.number}`);
+
+            // Comment on the issue to confirm trigger
+            await github.rest.issues.createComment({
+              owner: repo.owner,
+              repo: repo.repo,
+              issue_number: issue.number,
+              body: `🤖 **AI Builder Agent triggered**\n\nThe builder agent has been dispatched to work on this issue.\n\nTrack progress: https://github.com/${ghOwner}/${agentsRepo}/actions/workflows/on-demand-agent.yml`
+            });

@@ -1,0 +1,149 @@
+name: 'Trigger Builder Agent'
+description: 'Check for issues with a given label and trigger the builder agent workflow'
+
+inputs:
+  github-token:
+    description: 'GitHub token with permissions to list issues and trigger workflows'
+    required: true
+  label:
+    description: 'Label to search for (e.g., ai-in-progress or ai-in-progress-staging)'
+    required: true
+  comment-prefix:
+    description: 'Prefix for the comment (e.g., "AI Builder Agent")'
+    required: true
+  workflow-ref:
+    description: 'Git ref to trigger workflow from (e.g., main or staging)'
+    required: true
+  staging:
+    description: 'Whether this is a staging build (true/false)'
+    required: false
+    default: 'false'
+
+outputs:
+  has_issues:
+    description: 'Whether any issues were found with the label'
+    value: ${{ steps.check.outputs.has_issues }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check for issues and add comments
+      id: check
+      uses: actions/github-script@v7
+      env:
+        GH_OWNER: ${{ vars.GH_OWNER }}
+        GH_AGENTS_REPO_NAME: ${{ vars.GH_AGENTS_REPO_NAME }}
+        MONITORED_REPOS: ${{ vars.MONITORED_REPOS }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const label = '${{ inputs.label }}';
+          const commentPrefix = '${{ inputs.comment-prefix }}';
+          const isStaging = '${{ inputs.staging }}' === 'true';
+          const ghOwner = process.env.GH_OWNER;
+          const agentsRepo = process.env.GH_AGENTS_REPO_NAME;
+
+          // Repos come from MONITORED_REPOS variable — no hardcoding
+          const monitoredRepos = (process.env.MONITORED_REPOS || '')
+            .split(',')
+            .map(r => r.trim())
+            .filter(r => r);
+
+          let hasIssues = false;
+          const issuesToNotify = [];
+
+          for (const fullRepo of monitoredRepos) {
+            const [repoOwner, repoName] = fullRepo.split('/');
+            if (!repoOwner || !repoName) continue;
+
+            try {
+              const issues = await github.rest.issues.listForRepo({
+                owner: repoOwner,
+                repo: repoName,
+                labels: label,
+                state: 'open',
+                per_page: 10
+              });
+
+              for (const issue of issues.data) {
+                console.log(`Found ${label} issue in ${fullRepo}: #${issue.number}`);
+                hasIssues = true;
+                issuesToNotify.push({ owner: repoOwner, repo: repoName, number: issue.number, title: issue.title });
+              }
+            } catch (e) {
+              console.log(`Could not check ${fullRepo}: ${e.message}`);
+            }
+          }
+
+          // Add comment to each issue being processed (deduplicated — skip if already commented in last hour)
+          for (const issue of issuesToNotify) {
+            try {
+              const comments = await github.rest.issues.listComments({
+                owner: issue.owner,
+                repo: issue.repo,
+                issue_number: issue.number,
+                per_page: 20
+              });
+
+              const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+              const recentBotComment = comments.data.find(c =>
+                c.user.type === 'Bot' &&
+                c.body.includes(`${commentPrefix} triggered`) &&
+                new Date(c.created_at) > oneHourAgo
+              );
+
+              if (!recentBotComment) {
+                const emoji = isStaging ? '🧪' : '🤖';
+                const branchNote = isStaging ? ' using the **staging** branch' : ' via AI Queue sync';
+                await github.rest.issues.createComment({
+                  owner: issue.owner,
+                  repo: issue.repo,
+                  issue_number: issue.number,
+                  body: `${emoji} **${commentPrefix} triggered**\n\nThe builder agent has been dispatched to work on this issue${branchNote}.\n\nTrack progress: https://github.com/${ghOwner}/${agentsRepo}/actions/workflows/on-demand-agent.yml`
+                });
+                console.log(`Added comment to ${issue.owner}/${issue.repo}#${issue.number}`);
+              } else {
+                console.log(`Skipping comment for ${issue.owner}/${issue.repo}#${issue.number} - already notified recently`);
+              }
+            } catch (e) {
+              console.log(`Could not add comment to ${issue.owner}/${issue.repo}#${issue.number}: ${e.message}`);
+            }
+          }
+
+          core.setOutput('has_issues', hasIssues);
+          return hasIssues;
+
+    - name: Trigger Builder Agent Workflow
+      if: steps.check.outputs.has_issues == 'true'
+      uses: actions/github-script@v7
+      env:
+        GH_OWNER: ${{ vars.GH_OWNER }}
+        GH_AGENTS_REPO_NAME: ${{ vars.GH_AGENTS_REPO_NAME }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const ref = '${{ inputs.workflow-ref }}';
+          const staging = '${{ inputs.staging }}';
+          const ghOwner = process.env.GH_OWNER;
+          const agentsRepo = process.env.GH_AGENTS_REPO_NAME;
+
+          const inputs = {
+            agent: 'builder',
+            max_issues: '3',
+            parallel: 'true',
+            max_concurrent: '3',
+            verbose: 'true'
+          };
+
+          if (staging === 'true') {
+            inputs.staging = 'true';
+          }
+
+          await github.rest.actions.createWorkflowDispatch({
+            owner: ghOwner,
+            repo: agentsRepo,
+            workflow_id: 'on-demand-agent.yml',
+            ref: ref,
+            inputs: inputs
+          });
+          console.log(`Builder Agent workflow triggered (owner: ${ghOwner}, ref: ${ref}, staging: ${staging})`);

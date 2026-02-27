@@ -1,0 +1,159 @@
+name: On-Demand Agent Execution
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: 'Agent to run'
+        required: true
+        type: choice
+        options:
+          - builder
+          - tester
+          - designer
+          - planner
+          - supervisor
+      max_issues:
+        description: 'Maximum issues to process'
+        required: false
+        default: '5'
+        type: string
+      parallel:
+        description: 'Enable parallel issue processing'
+        required: false
+        default: true
+        type: boolean
+      max_concurrent:
+        description: 'Maximum concurrent issues'
+        required: false
+        default: '3'
+        type: string
+      target_repo:
+        description: 'Target repo (e.g., qltechin/app)'
+        required: false
+        type: string
+      issue_number:
+        description: 'Specific issue number to process'
+        required: false
+        type: string
+      target_pr:
+        description: 'PR number (for tester/designer agents)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Run without making changes'
+        required: false
+        default: 'false'
+        type: boolean
+      verbose:
+        description: 'Enable verbose output'
+        required: false
+        default: 'true'
+        type: boolean
+      staging:
+        description: 'Use staging environment'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.staging && 'staging' || github.ref }}
+
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ vars.GH_OWNER }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+
+      - name: Install GitHub CLI
+        run: |
+          type -p gh > /dev/null || (
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg &&
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null &&
+            sudo apt update && sudo apt install gh -y
+          )
+          gh --version
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ai-agents@qltechin.github.io"
+          git config --global user.name "AI Agents"
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Run Agent
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_OWNER: ${{ vars.GH_OWNER }}
+          GH_ACCOUNT_TYPE: ${{ vars.GH_ACCOUNT_TYPE }}
+          GH_PROJECT_NUMBER: ${{ vars.GH_PROJECT_NUMBER }}
+          MONITORED_REPOS: ${{ vars.MONITORED_REPOS }}
+          GH_AGENTS_REPO_NAME: ${{ vars.GH_AGENTS_REPO_NAME }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          VERBOSE: ${{ inputs.verbose && 'true' || 'false' }}
+          STAGING: ${{ inputs.staging && 'true' || 'false' }}
+        run: |
+          ARGS="--max-issues ${{ inputs.max_issues || '5' }}"
+
+          if [ "${{ inputs.parallel }}" = "true" ]; then
+            ARGS="$ARGS --parallel --max-concurrent ${{ inputs.max_concurrent || '3' }}"
+          fi
+
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+
+          if [ "$VERBOSE" = "true" ]; then
+            ARGS="$ARGS --verbose"
+          fi
+
+          if [ -n "${{ inputs.target_repo }}" ]; then
+            ARGS="$ARGS --target-repo ${{ inputs.target_repo }}"
+          fi
+
+          if [ -n "${{ inputs.issue_number }}" ]; then
+            ARGS="$ARGS --issue-number ${{ inputs.issue_number }}"
+          fi
+
+          if [ -n "${{ inputs.target_pr }}" ]; then
+            ARGS="$ARGS --pr ${{ inputs.target_pr }}"
+          fi
+
+          echo "Running: python -m cli.main ${{ inputs.agent }} $ARGS"
+          python -m cli.main ${{ inputs.agent }} $ARGS
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Agent Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Agent | ${{ inputs.agent }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dry Run | ${{ inputs.dry_run }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target Repo | ${{ inputs.target_repo || 'all monitored repos' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |" >> $GITHUB_STEP_SUMMARY

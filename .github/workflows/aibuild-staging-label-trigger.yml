@@ -1,0 +1,56 @@
+name: Trigger Builder on aibuild-staging Label
+
+# Triggers the Builder Agent on STAGING branch when 'aibuild-staging' label is added.
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  trigger-builder-staging:
+    name: Trigger Builder Agent (Staging)
+    runs-on: ubuntu-latest
+    if: github.event.label.name == 'aibuild-staging'
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ vars.GH_OWNER }}
+
+      - name: Trigger Builder Agent Workflow (Staging)
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const issue = context.payload.issue;
+            const repo = context.repo;
+            const ghOwner = '${{ vars.GH_OWNER }}';
+            const agentsRepo = '${{ vars.GH_AGENTS_REPO_NAME }}';
+
+            console.log(`aibuild-staging label added to ${repo.owner}/${repo.repo}#${issue.number}`);
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner: ghOwner,
+              repo: agentsRepo,
+              workflow_id: 'on-demand-agent.yml',
+              ref: 'staging',
+              inputs: {
+                agent: 'builder',
+                issue_number: String(issue.number),
+                target_repo: `${repo.owner}/${repo.repo}`,
+                max_issues: '1',
+                verbose: 'true',
+                staging: 'true'
+              }
+            });
+
+            await github.rest.issues.createComment({
+              owner: repo.owner,
+              repo: repo.repo,
+              issue_number: issue.number,
+              body: `🧪 **AI Builder Agent triggered (STAGING)**\n\nThe builder agent has been dispatched in **staging mode**.\n\nTrack progress: https://github.com/${ghOwner}/${agentsRepo}/actions/workflows/on-demand-agent.yml`
+            });

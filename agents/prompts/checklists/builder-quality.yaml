@@ -1,0 +1,183 @@
+# Builder Quality Checklist
+#
+# BMAD-compatible checklist for validating builder agent output quality.
+# Used to ensure PRs meet quality standards before submission.
+
+name: Builder Quality Checklist
+version: "1.0"
+description: |
+  Quality gates for validating code changes made by the Builder Agent.
+  All critical items must pass before a PR can be created.
+
+sections:
+  code_quality:
+    name: Code Quality
+    items:
+      - id: follows_patterns
+        text: Changes follow existing codebase patterns
+        severity: critical
+        auto_check: false
+
+      - id: no_hardcoded_secrets
+        text: No hardcoded credentials, API keys, or secrets
+        severity: critical
+        auto_check: true
+        check_patterns:
+          - "api_key\\s*=\\s*['\"][^'\"]+['\"]"
+          - "password\\s*=\\s*['\"][^'\"]+['\"]"
+          - "secret\\s*=\\s*['\"][^'\"]+['\"]"
+
+      - id: proper_error_handling
+        text: Proper error handling in new code
+        severity: high
+        auto_check: false
+
+      - id: no_console_logs
+        text: No debug console.log/print statements left in
+        severity: medium
+        auto_check: true
+        check_patterns:
+          - "console\\.log\\("
+          - "print\\("
+          - "debugPrint\\("
+
+      - id: meaningful_names
+        text: Variables and functions have meaningful names
+        severity: medium
+        auto_check: false
+
+  testing:
+    name: Testing
+    items:
+      - id: tests_pass
+        text: All existing tests pass
+        severity: critical
+        auto_check: true
+        command: "flutter test || pytest || mvn test"
+
+      - id: new_tests_added
+        text: New functionality has test coverage
+        severity: high
+        auto_check: false
+
+      - id: no_test_skips
+        text: No tests skipped without justification
+        severity: medium
+        auto_check: true
+        check_patterns:
+          - "skip:"
+          - "@Skip"
+          - "pytest.mark.skip"
+
+  security:
+    name: Security
+    items:
+      - id: no_sql_injection
+        text: No raw SQL with string interpolation
+        severity: critical
+        auto_check: true
+        check_patterns:
+          - "execute\\(.*\\+.*\\)"
+          - "execute\\(f['\"]"
+          - "executeQuery\\(.*\\+.*\\)"
+
+      - id: input_validation
+        text: User inputs are validated
+        severity: critical
+        auto_check: false
+
+      - id: no_xss
+        text: No unescaped user content in output
+        severity: critical
+        auto_check: false
+
+      - id: proper_auth_checks
+        text: Authorization checks on sensitive operations
+        severity: critical
+        auto_check: false
+
+  healthcare_compliance:
+    name: Healthcare Compliance
+    items:
+      - id: no_phi_logging
+        text: No PHI logged to console or files
+        severity: critical
+        auto_check: true
+        check_patterns:
+          - "log.*patient.*name"
+          - "log.*ssn"
+          - "log.*dob"
+          - "print.*patient.*id"
+
+      - id: data_encryption
+        text: Sensitive data encrypted at rest and in transit
+        severity: critical
+        auto_check: false
+
+      - id: audit_trail
+        text: Sensitive operations have audit logging
+        severity: high
+        auto_check: false
+
+  commit_quality:
+    name: Commit Quality
+    items:
+      - id: atomic_commit
+        text: Commit is atomic and focused
+        severity: high
+        auto_check: false
+
+      - id: meaningful_message
+        text: Commit message describes what and why
+        severity: medium
+        auto_check: true
+        check_patterns:
+          - "^fix:|^feat:|^docs:|^refactor:|^test:"
+
+      - id: issue_reference
+        text: Commit references the issue being fixed
+        severity: high
+        auto_check: true
+        check_patterns:
+          - "#\\d+"
+          - "Closes #\\d+"
+          - "Fixes #\\d+"
+
+  pr_quality:
+    name: Pull Request Quality
+    items:
+      - id: clear_description
+        text: PR has clear description of changes
+        severity: high
+        auto_check: false
+
+      - id: files_changed_reasonable
+        text: Number of files changed is reasonable for the issue
+        severity: medium
+        auto_check: true
+        max_files: 20
+
+      - id: no_unrelated_changes
+        text: No unrelated changes included
+        severity: high
+        auto_check: false
+
+severity_levels:
+  critical:
+    description: Must pass - blocks PR creation
+    action: fail
+  high:
+    description: Should pass - warns but allows PR
+    action: warn
+  medium:
+    description: Nice to have - informational
+    action: info
+
+validation_rules:
+  pr_creation_requires:
+    - all critical items pass
+    - tests_pass = true
+    - at least one file changed
+  warn_on:
+    - any high severity item fails
+    - more than 15 files changed

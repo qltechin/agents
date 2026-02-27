@@ -1,0 +1,183 @@
+# Builder Orchestration Workflow
+#
+# BMAD-compatible workflow definition for cyclical task orchestration.
+# Handles complex issues through iterative decomposition and integration.
+#
+# ============================================================================
+# STATUS: DISABLED (January 2025)
+# ============================================================================
+# Subtask orchestration has been disabled. The builder now processes each issue
+# in a single pass without spawning subtasks. PRs target the `staging` branch
+# for human review before being promoted to `main`.
+#
+# This workflow definition is retained for reference and potential future use.
+# ============================================================================
+
+name: Builder Orchestration
+version: "1.0"
+description: |
+  Cyclical workflow for handling complex issues that require multiple iterations.
+  Implements: ANALYZE -> SPAWN SUBTASKS -> WAIT -> INTEGRATE -> RE-ANALYZE
+
+phases:
+  analyze:
+    name: Issue Analysis
+    description: Analyze issue to determine complexity and approach
+    inputs:
+      - issue_title
+      - issue_body
+      - issue_labels
+      - iteration_context (for re-analysis)
+    outputs:
+      - complexity_level
+      - confidence_score
+      - suggested_approach
+      - subtasks (if complex/epic)
+      - roadblocks (if any)
+      - should_escalate (boolean)
+    prompt_template: |
+      Analyze this GitHub issue and determine:
+      1. Complexity level (simple, moderate, complex, epic)
+      2. Estimated files to modify
+      3. Whether new files need to be created
+      4. Suggested implementation approach
+      5. Subtasks (if complex/epic)
+      6. Potential roadblocks or unclear requirements
+
+      {% if iteration_context %}
+      ## Previous Iteration Context
+      {{ iteration_context }}
+
+      Based on work already completed, determine what remains.
+      {% endif %}
+
+  spawn_subtasks:
+    name: Subtask Creation
+    description: Create child issues for complex tasks
+    trigger: complexity in [complex, epic]
+    inputs:
+      - parent_issue
+      - subtask_definitions
+      - iteration_number
+    outputs:
+      - created_issue_numbers
+      - subtask_labels
+    actions:
+      # NOTE: Subtasks are created WITHOUT `aibuild` label to prevent cascade
+      # (see task_orchestrator.py:943 for rationale)
+      - Create issues (no aibuild label - tracked by orchestrator)
+      - Link to parent issue
+      - Update parent with decomposition comment
+      - Remove `aibuild` from parent issue
+
+  await_completion:
+    name: Await Subtasks
+    description: Wait for all subtasks to complete
+    inputs:
+      - subtask_issue_numbers
+    outputs:
+      - completion_status
+      - merged_prs
+    checks:
+      - All subtask issues closed
+      - Associated PRs merged
+    labels:
+      add: awaiting-subtasks
+      remove: aibuild
+
+  integrate:
+    name: Integration
+    description: Combine completed subtask changes
+    trigger: all subtasks complete
+    inputs:
+      - completed_subtasks
+      - merged_prs
+    outputs:
+      - integration_result
+      - remaining_work
+    actions:
+      - Update parent issue with completion status
+      - Remove awaiting-subtasks label
+      - Prepare for re-analysis
+
+  re_analyze:
+    name: Re-Analysis
+    description: Check if more work is needed
+    trigger: integration complete
+    inputs:
+      - parent_issue
+      - completed_iterations
+    outputs:
+      - is_complete (boolean)
+      - next_iteration_subtasks
+    decision:
+      if_complete: finalize
+      if_more_work: analyze (next iteration)
+      if_max_iterations: escalate
+
+  finalize:
+    name: Finalization
+    description: Complete the parent issue
+    trigger: is_complete = true
+    inputs:
+      - parent_issue
+      - all_iterations
+    outputs:
+      - final_status
+    actions:
+      - Add aicomplete label
+      - Remove decomposed, awaiting-subtasks labels
+      - Post completion summary comment
+      - Close issue (optional)
+
+  escalate:
+    name: Human Escalation
+    description: Request human intervention
+    trigger:
+      - should_escalate = true
+      - max_iterations reached
+      - repeated failures
+    inputs:
+      - parent_issue
+      - escalation_reason
+      - context
+    outputs:
+      - escalation_comment
+    actions:
+      - Add human-needed label
+      - Remove aibuild, awaiting-subtasks labels
+      - Post detailed escalation comment
+
+labels:
+  input:
+    aibuild: Issue ready for AI processing
+  in_progress:
+    ai-in-progress: Agent is working on issue
+  orchestration:
+    decomposed: Issue has been split into subtasks
+    awaiting-subtasks: Waiting for child issues to complete
+  output:
+    aicomplete: Successfully completed
+    ai-failed: Failed, needs review
+    human-needed: Requires human intervention
+
+iteration_limits:
+  max_iterations: 5
+  iteration_timeout_hours: 24
+  max_subtasks_per_iteration: 8
+
+cost_guardrails:
+  max_llm_calls_per_iteration: 50
+  max_total_llm_calls: 200
+  pause_on_cost_threshold: true
+
+reporting:
+  progress_comments: true
+  iteration_summaries: true
+  final_summary: true
+  include_metrics:
+    - iterations_count
+    - subtasks_created
+    - prs_merged
+    - total_files_changed
+    - time_to_completion

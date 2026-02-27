@@ -1,0 +1,56 @@
+name: Orchestrator Check
+
+# Triggered when a subtask issue is closed to check if all subtasks are complete
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Repository where the subtask was closed (e.g., qltechin/app)'
+        required: true
+        type: string
+      subtask_issue_number:
+        description: 'Issue number of the closed subtask'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-parent-completion:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ vars.GH_OWNER }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Run orchestrator check
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          SUBTASK_ISSUE_NUMBER: ${{ inputs.subtask_issue_number }}
+          GH_OWNER: ${{ vars.GH_OWNER }}
+          GH_ACCOUNT_TYPE: ${{ vars.GH_ACCOUNT_TYPE }}
+        run: |
+          python -m cli.main orchestrator-check \
+            --repository "$REPOSITORY" \
+            --subtask-issue "$SUBTASK_ISSUE_NUMBER"

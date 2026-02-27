@@ -1,0 +1,302 @@
+name: AI Queue Sync
+
+# Syncs GitHub Project status to the 'ai-in-progress' label to trigger the builder agent.
+# Supports both:
+#   1. Column-based: Moving issue to "AI Queue" status in Project
+#   2. Column-based: Moving issue to "AI Queue Staging" status in Project
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # Every hour
+
+  workflow_dispatch:
+    inputs:
+      project_number:
+        description: 'Project number to sync (leave empty for all configured projects)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run (no label changes)'
+        required: false
+        type: boolean
+        default: false
+
+  issues:
+    types: [labeled, unlabeled]
+
+env:
+  # All values come from repository variables — no hardcoding
+  GH_OWNER: ${{ vars.GH_OWNER }}
+  GH_ACCOUNT_TYPE: ${{ vars.GH_ACCOUNT_TYPE }}   # "user" or "org"
+  AI_QUEUE_STATUS: "AI Queue"
+  AI_QUEUE_STAGING_STATUS: "AI Queue Staging"
+  AI_BUILD_FIELD: "AI Build"
+  AIBUILD_LABEL: "aibuild"
+  AICOMPLETE_LABEL: "aicomplete"
+  AI_IN_PROGRESS_LABEL: "ai-in-progress"
+  AI_IN_PROGRESS_STAGING_LABEL: "ai-in-progress-staging"
+  PROJECT_NUMBERS: ${{ vars.GH_PROJECT_NUMBER }}
+
+jobs:
+  sync-project-to-labels:
+    name: Sync Project Status to Labels
+    runs-on: ubuntu-latest
+    if: github.event_name != 'issues' || github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ vars.GH_OWNER }}
+
+      - name: Sync AI Queue Status to Labels
+        uses: actions/github-script@v7
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          TARGET_PROJECT: ${{ github.event.inputs.project_number || '' }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const owner = process.env.GH_OWNER;
+            const accountType = process.env.GH_ACCOUNT_TYPE || 'user';
+            const aiQueueStatus = process.env.AI_QUEUE_STATUS;
+            const aiQueueStagingStatus = process.env.AI_QUEUE_STAGING_STATUS;
+            const aiBuildField = process.env.AI_BUILD_FIELD;
+            const aibuildLabel = process.env.AIBUILD_LABEL;
+            const aicompleteLabel = process.env.AICOMPLETE_LABEL;
+            const aiInProgressStagingLabel = process.env.AI_IN_PROGRESS_STAGING_LABEL;
+            const aiInProgressLabel = process.env.AI_IN_PROGRESS_LABEL;
+            const dryRun = process.env.DRY_RUN === 'true';
+            const targetProject = process.env.TARGET_PROJECT;
+
+            let projectNumbers = process.env.PROJECT_NUMBERS.split(',').map(n => n.trim()).filter(n => n);
+            if (targetProject) {
+              projectNumbers = [targetProject];
+            }
+
+            console.log(`Owner: ${owner} (${accountType})`);
+            console.log(`Syncing projects: ${projectNumbers.join(', ')}`);
+            console.log(`Dry run: ${dryRun}`);
+
+            for (const projectNumber of projectNumbers) {
+              console.log(`\n=== Processing Project #${projectNumber} ===`);
+
+              try {
+                // Dynamic query: "user" for personal accounts, "organization" for orgs
+                // This is critical — GitHub Projects v2 uses different root fields for each
+                const projectQuery = accountType === 'org' ? `
+                  query($owner: String!, $number: Int!) {
+                    organization(login: $owner) {
+                      projectV2(number: $number) {
+                        id title
+                        items(first: 100) {
+                          nodes {
+                            id
+                            fieldValues(first: 20) {
+                              nodes {
+                                ... on ProjectV2ItemFieldSingleSelectValue {
+                                  name
+                                  field { ... on ProjectV2SingleSelectField { name } }
+                                }
+                              }
+                            }
+                            content {
+                              ... on Issue {
+                                id number title
+                                repository { name owner { login } }
+                                labels(first: 20) { nodes { name } }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                ` : `
+                  query($owner: String!, $number: Int!) {
+                    user(login: $owner) {
+                      projectV2(number: $number) {
+                        id title
+                        items(first: 100) {
+                          nodes {
+                            id
+                            fieldValues(first: 20) {
+                              nodes {
+                                ... on ProjectV2ItemFieldSingleSelectValue {
+                                  name
+                                  field { ... on ProjectV2SingleSelectField { name } }
+                                }
+                              }
+                            }
+                            content {
+                              ... on Issue {
+                                id number title
+                                repository { name owner { login } }
+                                labels(first: 20) { nodes { name } }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                `;
+
+                const result = await github.graphql(projectQuery, {
+                  owner: owner,
+                  number: parseInt(projectNumber)
+                });
+
+                // Access data based on account type
+                const project = accountType === 'org'
+                  ? result.organization?.projectV2
+                  : result.user?.projectV2;
+
+                if (!project) {
+                  console.log(`Project #${projectNumber} not found or not accessible`);
+                  continue;
+                }
+
+                console.log(`Found project: ${project.title}`);
+
+                for (const item of project.items.nodes) {
+                  const issue = item.content;
+                  if (!issue || !issue.number) continue;
+
+                  const repo = issue.repository.name;
+                  const issueOwner = issue.repository.owner.login;
+                  const issueNumber = issue.number;
+                  const currentLabels = issue.labels.nodes.map(l => l.name);
+
+                  let inAIQueue = false;
+                  let inAIQueueStaging = false;
+
+                  for (const fieldValue of item.fieldValues.nodes) {
+                    if (!fieldValue.field) continue;
+                    const fieldName = fieldValue.field.name;
+                    if (fieldName === 'Status') {
+                      if (fieldValue.name === aiQueueStatus) inAIQueue = true;
+                      else if (fieldValue.name === aiQueueStagingStatus) inAIQueueStaging = true;
+                    }
+                  }
+
+                  const hasAicomplete = currentLabels.includes(aicompleteLabel);
+                  const hasAiInProgress = currentLabels.includes(aiInProgressLabel);
+                  const hasAiInProgressStaging = currentLabels.includes(aiInProgressStagingLabel);
+
+                  if (hasAicomplete) continue;
+                  if (hasAiInProgress || hasAiInProgressStaging) {
+                    console.log(`[SKIP] ${issueOwner}/${repo}#${issueNumber}: "${issue.title}" - Already in progress`);
+                    continue;
+                  }
+
+                  // Queue for PRODUCTION build
+                  if (inAIQueue && !hasAiInProgress) {
+                    console.log(`[QUEUE] ${issueOwner}/${repo}#${issueNumber}: "${issue.title}" - Adding to build queue`);
+                    if (!dryRun) {
+                      await github.rest.issues.addLabels({
+                        owner: issueOwner, repo, issue_number: issueNumber,
+                        labels: [aiInProgressLabel]
+                      });
+                    }
+                  }
+
+                  // Queue for STAGING build
+                  if (inAIQueueStaging) {
+                    console.log(`[QUEUE-STAGING] ${issueOwner}/${repo}#${issueNumber}: "${issue.title}" - Adding to staging queue`);
+                    if (!dryRun) {
+                      await github.rest.issues.addLabels({
+                        owner: issueOwner, repo, issue_number: issueNumber,
+                        labels: [aiInProgressStagingLabel]
+                      });
+                    }
+                  }
+
+                  // Remove ai-in-progress if issue moved out of AI Queue
+                  if (!inAIQueue && hasAiInProgress) {
+                    console.log(`[REMOVE] ${issueOwner}/${repo}#${issueNumber}: Removing '${aiInProgressLabel}'`);
+                    if (!dryRun) {
+                      try {
+                        await github.rest.issues.removeLabel({
+                          owner: issueOwner, repo, issue_number: issueNumber, name: aiInProgressLabel
+                        });
+                      } catch (e) { console.log(`  Note: Label may already be removed`); }
+                    }
+                  }
+
+                  // Remove ai-in-progress-staging if moved out of AI Queue Staging
+                  if (!inAIQueueStaging && hasAiInProgressStaging) {
+                    console.log(`[REMOVE] ${issueOwner}/${repo}#${issueNumber}: Removing '${aiInProgressStagingLabel}'`);
+                    if (!dryRun) {
+                      try {
+                        await github.rest.issues.removeLabel({
+                          owner: issueOwner, repo, issue_number: issueNumber, name: aiInProgressStagingLabel
+                        });
+                      } catch (e) { console.log(`  Note: Label may already be removed`); }
+                    }
+                  }
+                }
+
+              } catch (error) {
+                console.log(`Error processing project #${projectNumber}: ${error.message}`);
+              }
+            }
+
+            console.log('\n=== Sync complete ===');
+
+  trigger-builder-agent:
+    name: Trigger Builder Agent
+    needs: sync-project-to-labels
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ vars.GH_OWNER }}
+
+      - name: Trigger Builder Agent (Production)
+        uses: ./.github/actions/trigger-builder-agent
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          label: 'ai-in-progress'
+          comment-prefix: 'AI Builder Agent'
+          workflow-ref: 'main'
+          staging: 'false'
+
+  trigger-builder-agent-staging:
+    name: Trigger Builder Agent (Staging)
+    needs: sync-project-to-labels
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ vars.GH_OWNER }}
+
+      - name: Trigger Builder Agent (Staging)
+        uses: ./.github/actions/trigger-builder-agent
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          label: 'ai-in-progress-staging'
+          comment-prefix: 'AI Builder Agent (STAGING)'
+          workflow-ref: 'staging'
+          staging: 'true'
