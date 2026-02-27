@@ -188,19 +188,22 @@ jobs:
                   const hasAiInProgress = currentLabels.includes(aiInProgressLabel);
                   const hasAiInProgressStaging = currentLabels.includes(aiInProgressStagingLabel);
 
+                  // Skip if already completed or actively being worked on
                   if (hasAicomplete) continue;
                   if (hasAiInProgress || hasAiInProgressStaging) {
                     console.log(`[SKIP] ${issueOwner}/${repo}#${issueNumber}: "${issue.title}" - Already in progress`);
                     continue;
                   }
 
-                  // Queue for PRODUCTION build
-                  if (inAIQueue && !hasAiInProgress) {
-                    console.log(`[QUEUE] ${issueOwner}/${repo}#${issueNumber}: "${issue.title}" - Adding to build queue`);
+                  const hasAibuild = currentLabels.includes(aibuildLabel);
+
+                  // Queue for PRODUCTION build — add aibuild so the builder agent can find it
+                  if (inAIQueue && !hasAibuild) {
+                    console.log(`[QUEUE] ${issueOwner}/${repo}#${issueNumber}: "${issue.title}" - Adding aibuild label`);
                     if (!dryRun) {
                       await github.rest.issues.addLabels({
                         owner: issueOwner, repo, issue_number: issueNumber,
-                        labels: [aiInProgressLabel]
+                        labels: [aibuildLabel]
                       });
                     }
                   }
@@ -216,13 +219,13 @@ jobs:
                     }
                   }
 
-                  // Remove ai-in-progress if issue moved out of AI Queue
-                  if (!inAIQueue && hasAiInProgress) {
-                    console.log(`[REMOVE] ${issueOwner}/${repo}#${issueNumber}: Removing '${aiInProgressLabel}'`);
+                  // Remove aibuild if issue moved out of AI Queue
+                  if (!inAIQueue && hasAibuild) {
+                    console.log(`[REMOVE] ${issueOwner}/${repo}#${issueNumber}: Removing '${aibuildLabel}'`);
                     if (!dryRun) {
                       try {
                         await github.rest.issues.removeLabel({
-                          owner: issueOwner, repo, issue_number: issueNumber, name: aiInProgressLabel
+                          owner: issueOwner, repo, issue_number: issueNumber, name: aibuildLabel
                         });
                       } catch (e) { console.log(`  Note: Label may already be removed`); }
                     }
@@ -270,7 +273,7 @@ jobs:
         uses: ./.github/actions/trigger-builder-agent
         with:
           github-token: ${{ steps.app-token.outputs.token }}
-          label: 'ai-in-progress'
+          label: 'aibuild'
           comment-prefix: 'AI Builder Agent'
           workflow-ref: 'main'
           staging: 'false'
