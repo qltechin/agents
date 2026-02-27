@@ -18,6 +18,18 @@ inputs:
     description: 'Whether this is a staging build (true/false)'
     required: false
     default: 'false'
+  monitored-repos:
+    description: 'Comma-separated list of repos to monitor (e.g., qltechin/app)'
+    required: false
+    default: ''
+  agents-repo-name:
+    description: 'Name of the agents repository (e.g., agents)'
+    required: false
+    default: 'agents'
+  gh-owner:
+    description: 'GitHub owner (username or org)'
+    required: false
+    default: ''
 
 outputs:
   has_issues:
@@ -31,9 +43,9 @@ runs:
       id: check
       uses: actions/github-script@v7
       env:
-        GH_OWNER: ${{ vars.GH_OWNER }}
-        GH_AGENTS_REPO_NAME: ${{ vars.GH_AGENTS_REPO_NAME }}
-        MONITORED_REPOS: ${{ vars.MONITORED_REPOS }}
+        GH_OWNER: ${{ inputs.gh-owner }}
+        GH_AGENTS_REPO_NAME: ${{ inputs.agents-repo-name }}
+        MONITORED_REPOS: ${{ inputs.monitored-repos }}
       with:
         github-token: ${{ inputs.github-token }}
         script: |
@@ -43,7 +55,7 @@ runs:
           const ghOwner = process.env.GH_OWNER;
           const agentsRepo = process.env.GH_AGENTS_REPO_NAME;
 
-          // Repos come from MONITORED_REPOS variable — no hardcoding
+          // Repos come from monitored-repos input — no hardcoding
           const monitoredRepos = (process.env.MONITORED_REPOS || '')
             .split(',')
             .map(r => r.trim())
@@ -117,8 +129,8 @@ runs:
       if: steps.check.outputs.has_issues == 'true'
       uses: actions/github-script@v7
       env:
-        GH_OWNER: ${{ vars.GH_OWNER }}
-        GH_AGENTS_REPO_NAME: ${{ vars.GH_AGENTS_REPO_NAME }}
+        GH_OWNER: ${{ inputs.gh-owner }}
+        GH_AGENTS_REPO_NAME: ${{ inputs.agents-repo-name }}
       with:
         github-token: ${{ inputs.github-token }}
         script: |

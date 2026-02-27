@@ -273,6 +273,9 @@ jobs:
           comment-prefix: 'AI Builder Agent'
           workflow-ref: 'main'
           staging: 'false'
+          monitored-repos: ${{ vars.MONITORED_REPOS }}
+          agents-repo-name: ${{ vars.GH_AGENTS_REPO_NAME }}
+          gh-owner: ${{ vars.GH_OWNER }}
 
   trigger-builder-agent-staging:
     name: Trigger Builder Agent (Staging)
@@ -300,3 +303,6 @@ jobs:
           comment-prefix: 'AI Builder Agent (STAGING)'
           workflow-ref: 'staging'
           staging: 'true'
+          monitored-repos: ${{ vars.MONITORED_REPOS }}
+          agents-repo-name: ${{ vars.GH_AGENTS_REPO_NAME }}
+          gh-owner: ${{ vars.GH_OWNER }}
