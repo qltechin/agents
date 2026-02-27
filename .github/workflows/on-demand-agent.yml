@@ -99,6 +99,12 @@ jobs:
           )
           gh --version
 
+      - name: Install Codex CLI
+        if: inputs.agent == 'builder'
+        run: |
+          npm install -g @openai/codex
+          codex --version || echo "codex installed"
+
       - name: Configure git identity
         run: |
           git config --global user.email "ai-agents@qltechin.github.io"
@@ -109,6 +115,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
           GH_OWNER: ${{ vars.GH_OWNER }}
           GH_ACCOUNT_TYPE: ${{ vars.GH_ACCOUNT_TYPE }}
           GH_PROJECT_NUMBER: ${{ vars.GH_PROJECT_NUMBER }}
