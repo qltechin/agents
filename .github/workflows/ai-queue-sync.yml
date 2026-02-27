@@ -58,7 +58,8 @@ jobs:
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           TARGET_PROJECT: ${{ github.event.inputs.project_number || '' }}
         with:
-          github-token: ${{ steps.app-token.outputs.token }}
+          # Use PAT with project scope for Projects v2 GraphQL (App token lacks user project access)
+          github-token: ${{ secrets.GH_PAT || steps.app-token.outputs.token }}
           script: |
             const owner = process.env.GH_OWNER;
             const accountType = process.env.GH_ACCOUNT_TYPE || 'user';
