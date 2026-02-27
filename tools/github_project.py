@@ -32,6 +32,10 @@ class GitHubProjectClient:
     Supports both personal user accounts and organizations via account_type parameter.
     """
 
+    # Default project numbers - both point to project #1 (qltechin only has one project)
+    FLUTTER_PROJECT: int = 1
+    BACKEND_PROJECT: int = 1
+
     def __init__(self, owner: str, account_type: str = "user"):
         """Initialize the GitHub Project client.
 
