@@ -121,6 +121,7 @@ jobs:
           GH_PROJECT_NUMBER: ${{ vars.GH_PROJECT_NUMBER }}
           MONITORED_REPOS: ${{ vars.MONITORED_REPOS }}
           GH_AGENTS_REPO_NAME: ${{ vars.GH_AGENTS_REPO_NAME }}
+          BUILDER_REPOS: ${{ vars.MONITORED_REPOS }}
           DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
           VERBOSE: ${{ inputs.verbose && 'true' || 'false' }}
           STAGING: ${{ inputs.staging && 'true' || 'false' }}
