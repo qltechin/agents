@@ -211,6 +211,7 @@ class BuilderAgent(BaseAgent[BuilderState]):
         settings: Settings | None = None,
         max_issues: int = 1,
         target_repo: str | None = None,
+        issue_number: int | None = None,
         parallel: bool = True,
         max_concurrent: int = 3,
         repo_lock: bool = False,
@@ -222,6 +223,7 @@ class BuilderAgent(BaseAgent[BuilderState]):
             settings: Application settings
             max_issues: Maximum issues to process per run
             target_repo: Specific repo to process (optional, processes all if None)
+            issue_number: Specific issue number to process (requires target_repo)
             parallel: Enable parallel issue processing (default: True)
             max_concurrent: Maximum concurrent issues to process (default: 3)
             repo_lock: Enable per-repo locking to serialize same-repo issues (default: False)
@@ -229,6 +231,7 @@ class BuilderAgent(BaseAgent[BuilderState]):
         super().__init__(settings=settings)
         self.max_issues_per_run = max_issues
         self.target_repo = target_repo
+        self.target_issue_number = issue_number
         self.parallel = parallel
         self.max_concurrent = max_concurrent
         self.repo_lock = repo_lock
@@ -470,6 +473,12 @@ class BuilderAgent(BaseAgent[BuilderState]):
                 self.log(f"Searching for issues in {repo}...")
                 issues = await self._find_aibuild_issues(repo)
                 all_issues.extend(issues)
+
+            # Filter to specific issue number if requested
+            if self.target_issue_number is not None:
+                all_issues = [i for i in all_issues if i["number"] == self.target_issue_number]
+                if not all_issues:
+                    self.log(f"Issue #{self.target_issue_number} not found with 'aibuild' label")
 
             if not all_issues:
                 self.log("No issues found with 'aibuild' label across all repos")

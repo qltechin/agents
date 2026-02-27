@@ -518,6 +518,12 @@ def builder(
         "-r",
         help="Specific repo to process (default: all configured repos)",
     ),
+    issue_number: int | None = typer.Option(
+        None,
+        "--issue-number",
+        "-i",
+        help="Specific issue number to process (requires --target-repo)",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -555,6 +561,8 @@ def builder(
         console.print(f"Target repo: {target_repo}")
     else:
         console.print(f"Repos: {settings.builder_repos}")
+    if issue_number:
+        console.print(f"Issue number: #{issue_number}")
     console.print(f"Dry run: {dry_run}")
     console.print()
 
@@ -562,6 +570,7 @@ def builder(
         settings=settings,
         max_issues=max_issues,
         target_repo=target_repo,
+        issue_number=issue_number,
         parallel=parallel,
         max_concurrent=max_concurrent,
         repo_lock=repo_lock,
