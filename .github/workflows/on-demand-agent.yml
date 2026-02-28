@@ -122,6 +122,7 @@ jobs:
           MONITORED_REPOS: ${{ vars.MONITORED_REPOS }}
           GH_AGENTS_REPO_NAME: ${{ vars.GH_AGENTS_REPO_NAME }}
           BUILDER_REPOS: ${{ vars.MONITORED_REPOS }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
           VERBOSE: ${{ inputs.verbose && 'true' || 'false' }}
           STAGING: ${{ inputs.staging && 'true' || 'false' }}

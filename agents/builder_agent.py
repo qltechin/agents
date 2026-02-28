@@ -1475,21 +1475,45 @@ If this issue involves UI/UX work, refer to Figma designs:
                 prompt += story_section
 
         try:
-            # Check Codex CLI version
-            cli_version = subprocess.run(["codex", "--version"], capture_output=True, text=True)
-            if cli_version.returncode == 0:
-                self.log(f"Codex CLI version: {cli_version.stdout.strip()}")
-            else:
-                self.log(f"Codex CLI version check failed: {cli_version.stderr}", level="warning")
-
             # Reset roadblock detector for this run
             self.roadblock_detector.reset()
 
             changes_made: list[str] = []
-            build_id = os.environ.get("CODEBUILD_BUILD_ID", "local")
 
-            # Setup Codex auth from Secrets Manager
-            with CodexAuthContext(build_id=build_id):
+            # --- DeepSeek path (preferred when DEEPSEEK_API_KEY is set) ---
+            deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY") or (
+                self.settings.deepseek_api_key if hasattr(self.settings, "deepseek_api_key") else None
+            )
+            if deepseek_api_key:
+                self.log("Using DeepSeek agent for code generation")
+                from tools.deepseek_agent import run_deepseek_agent
+
+                deepseek_result = await run_deepseek_agent(
+                    work_dir=work_dir,
+                    prompt=prompt,
+                    api_key=deepseek_api_key,
+                    logger=self.log,
+                )
+                changes_made = deepseek_result.get("files_changed", [])
+                self.log(f"DeepSeek completed in {deepseek_result.get('turns', 0)} turns")
+
+                # Skip to git-status check below (same as after Codex block)
+                # Fall through to the existing git-check-and-commit logic
+
+            else:
+                # --- Codex CLI path (fallback) ---
+                # Check Codex CLI version
+                cli_version = subprocess.run(["codex", "--version"], capture_output=True, text=True)
+                if cli_version.returncode == 0:
+                    self.log(f"Codex CLI version: {cli_version.stdout.strip()}")
+                else:
+                    self.log(f"Codex CLI version check failed: {cli_version.stderr}", level="warning")
+
+                build_id = os.environ.get("CODEBUILD_BUILD_ID", "local")
+
+            # Setup Codex auth from Secrets Manager (only when not using DeepSeek)
+            if not deepseek_api_key:
+              with CodexAuthContext(build_id=build_id):
                 self.log("Codex auth setup complete")
 
                 # Build codex exec command
