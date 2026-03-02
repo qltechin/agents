@@ -26,11 +26,27 @@ class Settings(BaseSettings):
     gh_project_number: int = Field(default=1, description="GitHub Project number for the main project board")
     gh_agents_repo_name: str = Field(default="agents", description="Name of the agents repository")
 
-    # LLM Configuration
+    # LLM Configuration (used for orchestration / analysis)
     llm_provider: Literal["anthropic", "bedrock", "cerebras"] = Field(
         default="anthropic", description="LLM provider to use (anthropic, bedrock, cerebras)"
     )
     anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
+
+    # Code Agent Configuration (autonomous code generation inside builder)
+    # Set CODE_AGENT_PROVIDER env var to switch at runtime without redeploying
+    code_agent_provider: Literal["claude", "deepseek", "codex", "auto"] = Field(
+        default="auto",
+        description="Code agent for writing code: claude, deepseek, codex, or auto (first available key)",
+    )
+    claude_code_model: str = Field(
+        default="claude-sonnet-4-6",
+        description="Claude model for code generation (separate from orchestration LLM)",
+    )
+    deepseek_api_key: str | None = Field(default=None, description="DeepSeek API key")
+    deepseek_model: str = Field(
+        default="deepseek-chat",
+        description="DeepSeek model ID (deepseek-chat or deepseek-reasoner)",
+    )
     bedrock_model_id: str = Field(
         default="global.anthropic.claude-opus-4-6-20251001-v1:0",
         description="Bedrock inference profile ID (Claude Opus 4.6)",

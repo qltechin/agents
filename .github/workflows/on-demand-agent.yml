@@ -114,15 +114,18 @@ jobs:
       - name: Run Agent
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
           GH_OWNER: ${{ vars.GH_OWNER }}
           GH_ACCOUNT_TYPE: ${{ vars.GH_ACCOUNT_TYPE }}
           GH_PROJECT_NUMBER: ${{ vars.GH_PROJECT_NUMBER }}
           MONITORED_REPOS: ${{ vars.MONITORED_REPOS }}
           GH_AGENTS_REPO_NAME: ${{ vars.GH_AGENTS_REPO_NAME }}
           BUILDER_REPOS: ${{ vars.MONITORED_REPOS }}
+          # Code agent provider: set CODE_AGENT_PROVIDER var to claude/deepseek/codex/auto
+          CODE_AGENT_PROVIDER: ${{ vars.CODE_AGENT_PROVIDER || 'auto' }}
+          # API keys — enable the ones you want to use
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
           DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
           VERBOSE: ${{ inputs.verbose && 'true' || 'false' }}
           STAGING: ${{ inputs.staging && 'true' || 'false' }}

@@ -1480,154 +1480,21 @@ If this issue involves UI/UX work, refer to Figma designs:
 
             changes_made: list[str] = []
 
-            # --- DeepSeek path (preferred when DEEPSEEK_API_KEY is set) ---
-            deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY") or (
-                self.settings.deepseek_api_key if hasattr(self.settings, "deepseek_api_key") else None
+            # --- Code Agent (claude / deepseek / codex) ---
+            # Switch provider via CODE_AGENT_PROVIDER env var or settings.code_agent_provider
+            from tools.code_agent import run_code_agent
+
+            agent_result = await run_code_agent(
+                work_dir=work_dir,
+                prompt=prompt,
+                settings=self.settings,
+                logger=self.log,
             )
-            if deepseek_api_key:
-                self.log("Using DeepSeek agent for code generation")
-                from tools.deepseek_agent import run_deepseek_agent
-
-                deepseek_result = await run_deepseek_agent(
-                    work_dir=work_dir,
-                    prompt=prompt,
-                    api_key=deepseek_api_key,
-                    logger=self.log,
-                )
-                changes_made = deepseek_result.get("files_changed", [])
-                self.log(f"DeepSeek completed in {deepseek_result.get('turns', 0)} turns")
-
-                # Skip to git-status check below (same as after Codex block)
-                # Fall through to the existing git-check-and-commit logic
-
-            else:
-                # --- Codex CLI path (fallback) ---
-                # Check Codex CLI version
-                cli_version = subprocess.run(["codex", "--version"], capture_output=True, text=True)
-                if cli_version.returncode == 0:
-                    self.log(f"Codex CLI version: {cli_version.stdout.strip()}")
-                else:
-                    self.log(f"Codex CLI version check failed: {cli_version.stderr}", level="warning")
-
-                build_id = os.environ.get("CODEBUILD_BUILD_ID", "local")
-
-            # Setup Codex auth from Secrets Manager (only when not using DeepSeek)
-            if not deepseek_api_key:
-              with CodexAuthContext(build_id=build_id):
-                self.log("Codex auth setup complete")
-
-                # Build codex exec command
-                # Use --yolo (--dangerously-bypass-approvals-and-sandbox) to fully bypass sandbox
-                # SECURITY: Only use --yolo in CodeBuild container environment
-                self._verify_codebuild_environment()
-
-                codex_cmd = [
-                    "codex",
-                    "exec",
-                    "--yolo",  # Bypass approvals and sandbox (safe in CodeBuild container)
-                    "--json",
-                    "-C",
-                    work_dir,  # Set working directory
-                    prompt,
-                ]
-
-                self.log(f"Codex CLI command: codex exec --yolo --json -C {work_dir} [prompt]")
-
-                # Run Codex CLI
-                # Use a longer timeout since Codex can take a while for complex tasks
-                codex_timeout = 900  # 15 minutes
-
-                try:
-                    # Use asyncio.to_thread to avoid blocking the event loop
-                    result = await asyncio.to_thread(
-                        subprocess.run,
-                        codex_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=codex_timeout,
-                        cwd=work_dir,
-                    )
-
-                    # Log raw output for debugging
-                    self.log(f"Codex CLI exit code: {result.returncode}")
-                    self.log(f"Codex stdout length: {len(result.stdout)} chars")
-                    self.log(f"Codex stderr length: {len(result.stderr)} chars")
-
-                    if not result.stdout.strip():
-                        self.log("Codex produced no stdout output", level="warning")
-                        if result.stderr:
-                            self.log(f"Codex stderr: {result.stderr[:1000]}", level="warning")
-
-                    # Log first 500 chars of raw output for debugging
-                    if result.stdout:
-                        self.log(f"Codex raw output (first 500): {result.stdout[:500]}")
-
-                    # Parse JSON output (newline-delimited JSON events)
-                    if result.stdout:
-                        for line in result.stdout.strip().split("\n"):
-                            if not line.strip():
-                                continue
-                            try:
-                                event = json.loads(line)
-                                event_type = event.get("type", "")
-
-                                if event_type == "item.completed":
-                                    item = event.get("item", {})
-                                    item_type = item.get("type", "")
-
-                                    if item_type == "file_change":
-                                        for change in item.get("changes", []):
-                                            file_path = change.get("path")
-                                            kind = change.get("kind", "")
-                                            if file_path and kind in ("add", "update"):
-                                                changes_made.append(file_path)
-                                        self.log(f"[FILE_CHANGE] {len(item.get('changes', []))} file(s)")
-
-                                    elif item_type == "command_execution":
-                                        cmd = item.get("command", "")[:60]
-                                        self.log(f"[COMMAND] {cmd}")
-
-                                    elif item_type == "agent_message":
-                                        text = item.get("text", "")[:200]
-                                        self.log(f"[MESSAGE] {text}")
-
-                                        # Check for roadblocks
-                                        roadblocks = self.roadblock_detector.check(text)
-                                        if roadblocks:
-                                            self.log(f"[ROADBLOCK] Detected: {roadblocks[0]}", level="warning")
-
-                                elif event_type == "turn.completed":
-                                    self.log("[RESULT] Codex turn completed")
-
-                            except json.JSONDecodeError:
-                                # Non-JSON line, log if verbose
-                                if self.settings.verbose:
-                                    self.log(f"[OUTPUT] {line[:200]}")
-
-                    # Log any errors
-                    if result.returncode != 0:
-                        self.log(f"Codex CLI exited with code {result.returncode}", level="warning")
-                        if result.stderr:
-                            self.log(f"Codex stderr: {result.stderr[:500]}", level="warning")
-
-                            # Check for auth errors
-                            if "auth" in result.stderr.lower() or "login" in result.stderr.lower():
-                                return {
-                                    "fix_applied": False,
-                                    "error": "Codex authentication failed - refresh token may have expired",
-                                    "auth_error": True,
-                                }
-
-                except subprocess.TimeoutExpired:
-                    self.log(f"Codex CLI timed out after {codex_timeout}s", level="error")
-                    return {"fix_applied": False, "error": f"Codex timed out after {codex_timeout}s"}
-
-                except Exception as e:
-                    self.log(f"Codex CLI error: {e}", level="error")
-                    import traceback
-
-                    self.log(f"Traceback: {traceback.format_exc()}", level="error")
-                    raise
+            changes_made = agent_result.get("files_changed", [])
+            self.log(
+                f"Code agent done in {agent_result.get('turns', 0)} turn(s), "
+                f"files changed: {changes_made}"
+            )
 
             # Check if any files were actually modified
             git_status = subprocess.run(["git", "status", "--porcelain"], cwd=work_dir, capture_output=True, text=True)
@@ -1773,7 +1640,7 @@ Co-Authored-By: Codex <noreply@openai.com>
                 return {"fix_applied": False, "error": "No changes made"}
 
         except Exception as e:
-            self.log(f"Codex CLI error: {e}", level="error")
+            self.log(f"Agent error: {e}", level="error")
             return {"fix_applied": False, "error": str(e)}
 
     async def _run_tests(self, work_dir: str, config: RepoConfig, container_id: str | None) -> bool:
