@@ -162,37 +162,117 @@ jobs:
           fi
 
           echo "Running: python -m cli.main ${{ inputs.agent }} $ARGS"
+          set -o pipefail
           if [ -n "$ISSUE_COMMENT" ]; then
-            python -m cli.main ${{ inputs.agent }} $ARGS --comment "$ISSUE_COMMENT"
+            python -m cli.main ${{ inputs.agent }} $ARGS --comment "$ISSUE_COMMENT" 2>&1 | tee /tmp/agent_output.log
           else
-            python -m cli.main ${{ inputs.agent }} $ARGS
+            python -m cli.main ${{ inputs.agent }} $ARGS 2>&1 | tee /tmp/agent_output.log
           fi
 
       - name: Summary
         if: always()
+        env:
+          ISSUE_COMMENT: ${{ inputs.comment }}
         run: |
-          echo "## Agent Execution Summary" >> $GITHUB_STEP_SUMMARY
-          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Agent | ${{ inputs.agent }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Dry Run | ${{ inputs.dry_run }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Target Repo | ${{ inputs.target_repo || 'all monitored repos' }} |" >> $GITHUB_STEP_SUMMARY
-          if [ -n "${{ inputs.issue_number }}" ]; then
-            echo "| Issue | #${{ inputs.issue_number }} |" >> $GITHUB_STEP_SUMMARY
+          LOG=/tmp/agent_output.log
+
+          # --- Determine run status ---
+          if grep -qiE "PR updated successfully|PR created:|Fixed [0-9]+ error|Processed [0-9]+ issue" "$LOG" 2>/dev/null; then
+            STATUS="✅ Success"
+          elif grep -qiE "\[ERROR\]|Error:|exit code 1" "$LOG" 2>/dev/null; then
+            STATUS="❌ Failed"
+          else
+            STATUS="⚠️ Unknown"
           fi
-          if [ -n "${{ inputs.target_pr }}" ]; then
-            echo "| Mode | Lint Fix |" >> $GITHUB_STEP_SUMMARY
-            echo "| PR | #${{ inputs.target_pr }} |" >> $GITHUB_STEP_SUMMARY
+
+          # --- Determine mode ---
+          if [ -n "$ISSUE_COMMENT" ]; then
+            MODE="PR Iteration"
+          elif [ -n "${{ inputs.target_pr }}" ]; then
+            MODE="Lint Fix"
+          else
+            MODE="Issue Processing"
           fi
-          if [ -n "${{ inputs.comment }}" ]; then
-            echo "| Mode | PR Iteration |" >> $GITHUB_STEP_SUMMARY
-            echo "| Feedback | $(echo '${{ inputs.comment }}' | head -c 120) |" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Log Search Tips" >> $GITHUB_STEP_SUMMARY
-          echo "Search the **Run Agent** step output for:" >> $GITHUB_STEP_SUMMARY
-          echo '- `[ITERATE]` — PR iteration progress and results' >> $GITHUB_STEP_SUMMARY
-          echo '- `[LINT-FIX]` — lint fix progress and results' >> $GITHUB_STEP_SUMMARY
-          echo '- `[ANALYZE]` — flutter analyze output' >> $GITHUB_STEP_SUMMARY
-          echo '- `[ERROR]` — any failures' >> $GITHUB_STEP_SUMMARY
+
+          # --- Extract PR URL(s) from agent output ---
+          PR_URLS=$(grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' "$LOG" 2>/dev/null | sort -u || true)
+
+          # --- Extract files changed ---
+          FILES_LINE=$(grep "Files changed:" "$LOG" 2>/dev/null | tail -1 | sed 's/.*Files changed: //' || true)
+
+          # --- Extract issues processed ---
+          PROCESSED_LINE=$(grep -E "Processed [0-9]+ issue" "$LOG" 2>/dev/null | tail -1 || true)
+
+          # --- Extract error count (lint-fix) ---
+          FIXED_LINE=$(grep -E "Fixed [0-9]+ error" "$LOG" 2>/dev/null | tail -1 || true)
+
+          # --- Extract any [ERROR] or [WARNING] lines ---
+          ERROR_LINES=$(grep -E "\[ERROR\]|\[WARNING\]" "$LOG" 2>/dev/null | tail -5 || true)
+
+          # --- Write summary ---
+          {
+            echo "## Agent Execution Summary"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Status | $STATUS |"
+            echo "| Agent | ${{ inputs.agent }} |"
+            echo "| Mode | $MODE |"
+            echo "| Target Repo | ${{ inputs.target_repo || 'all monitored repos' }} |"
+            [ -n "${{ inputs.issue_number }}" ] && echo "| Issue | [#${{ inputs.issue_number }}](https://github.com/${{ inputs.target_repo }}/issues/${{ inputs.issue_number }}) |"
+            [ -n "${{ inputs.target_pr }}" ]   && echo "| Target PR | [#${{ inputs.target_pr }}](https://github.com/${{ inputs.target_repo }}/pull/${{ inputs.target_pr }}) |"
+            echo "| Dry Run | ${{ inputs.dry_run }} |"
+            echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+            echo ""
+
+            # PR links
+            if [ -n "$PR_URLS" ]; then
+              echo "### 🔗 PR(s) Created / Updated"
+              while IFS= read -r url; do
+                echo "- $url"
+              done <<< "$PR_URLS"
+              echo ""
+            fi
+
+            # Files changed
+            if [ -n "$FILES_LINE" ]; then
+              echo "### 📝 Files Changed"
+              echo "$FILES_LINE" | tr ',' '\n' | sed 's/^ */- /'
+              echo ""
+            fi
+
+            # Processed / fixed summary line
+            if [ -n "$PROCESSED_LINE" ]; then
+              echo "### 📋 Result"
+              echo "$PROCESSED_LINE"
+              echo ""
+            fi
+            if [ -n "$FIXED_LINE" ]; then
+              echo "### 🔧 Lint Fix Result"
+              echo "$FIXED_LINE"
+              echo ""
+            fi
+
+            # Feedback snippet (iterate mode)
+            if [ -n "$ISSUE_COMMENT" ]; then
+              echo "### 💬 Feedback Applied"
+              printf '> %s\n' "${ISSUE_COMMENT:0:300}"
+              echo ""
+            fi
+
+            # Errors / warnings
+            if [ -n "$ERROR_LINES" ]; then
+              echo "### ⚠️ Errors / Warnings"
+              echo '```'
+              echo "$ERROR_LINES"
+              echo '```'
+              echo ""
+            fi
+
+            echo "### 🔍 Log Search Tips"
+            echo "Search the **Run Agent** step output for:"
+            echo '- `[ITERATE]` — PR iteration progress'
+            echo '- `[LINT-FIX]` — lint fix progress'
+            echo '- `[ANALYZE]` — flutter analyze output'
+            echo '- `[ERROR]` — failures'
+          } >> $GITHUB_STEP_SUMMARY
