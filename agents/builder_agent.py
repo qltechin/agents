@@ -1133,32 +1133,57 @@ You may want to:
             config = self._load_repo_config(work_dir, repo)
             self.log(f"Project type: {config.type}, Language: {config.language}")
 
-            # Create branch for this issue (auto-increment if branch already exists)
+            # Create branch for this issue, or reuse the existing PR branch
             base_branch = f"ai/fix-issue-{issue['number']}"
-            branch_name = base_branch
-            version = 2
 
-            # Check if remote branch exists, increment until we find available name
-            while True:
-                result = subprocess.run(
-                    ["git", "ls-remote", "--heads", "origin", branch_name],
+            # Check if there is already an open PR for this issue.
+            # If yes, reuse its branch — never create a new one on top of existing work.
+            existing_pr_branch = None
+            existing_pr_url = None
+            pr_check = subprocess.run(
+                ["gh", "pr", "list", "--repo", repo, "--state", "open",
+                 "--search", f"head:ai/fix-issue-{issue['number']}",
+                 "--json", "headRefName,url"],
+                capture_output=True, text=True,
+            )
+            if pr_check.returncode == 0 and pr_check.stdout.strip():
+                prs = json.loads(pr_check.stdout)
+                if prs:
+                    existing_pr_branch = prs[-1]["headRefName"]
+                    existing_pr_url = prs[-1]["url"]
+                    self.log(f"Found existing open PR on branch {existing_pr_branch} — reusing it")
+
+            if existing_pr_branch:
+                branch_name = existing_pr_branch
+                subprocess.run(
+                    ["git", "checkout", branch_name],
                     cwd=work_dir,
                     capture_output=True,
-                    text=True,
                 )
-                if not result.stdout.strip():
-                    break  # Branch doesn't exist on remote, use it
-                self.log(f"Branch {branch_name} already exists, trying v{version}")
-                branch_name = f"{base_branch}-v{version}"
-                version += 1
-                if version > 100:  # Safety limit
-                    raise RuntimeError(f"Too many branch versions for issue {issue['number']}")
+            else:
+                # No existing PR — find a fresh branch name
+                branch_name = base_branch
+                version = 2
+                while True:
+                    result = subprocess.run(
+                        ["git", "ls-remote", "--heads", "origin", branch_name],
+                        cwd=work_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if not result.stdout.strip():
+                        break  # Branch doesn't exist on remote, use it
+                    self.log(f"Branch {branch_name} already exists, trying v{version}")
+                    branch_name = f"{base_branch}-v{version}"
+                    version += 1
+                    if version > 100:
+                        raise RuntimeError(f"Too many branch versions for issue {issue['number']}")
 
-            subprocess.run(
-                ["git", "checkout", "-b", branch_name],
-                cwd=work_dir,
-                capture_output=True,
-            )
+                subprocess.run(
+                    ["git", "checkout", "-b", branch_name],
+                    cwd=work_dir,
+                    capture_output=True,
+                )
 
             self.log(f"Repository ready on branch: {branch_name}")
 
@@ -1260,7 +1285,18 @@ You may want to:
                 extra_info={"Branch": branch_name, "Files": str(len(files_changed))},
             )
 
-            pr_url = await self._create_pr(work_dir, issue, branch_name, config)
+            # If we reused an existing PR branch, just push — don't open a duplicate PR
+            if existing_pr_branch:
+                push_result = subprocess.run(
+                    ["git", "push", "origin", branch_name],
+                    cwd=work_dir, capture_output=True, text=True,
+                )
+                if push_result.returncode != 0:
+                    self.log(f"Push to existing PR branch failed: {push_result.stderr}", level="error")
+                pr_url = existing_pr_url
+                self.log(f"Pushed updates to existing PR: {pr_url}")
+            else:
+                pr_url = await self._create_pr(work_dir, issue, branch_name, config)
 
             # Step 7: Check completion with orchestrator (DISABLED)
             # DISABLED: Subtask creation caused runaway cascade (issue #256)
