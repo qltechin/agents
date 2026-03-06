@@ -1,0 +1,123 @@
+name: Fix PR Lint Errors
+
+# Automatically fixes lint/import errors on AI-generated PRs.
+# Triggers when:
+#   1. The 'aifixlint' label is added to a PR (manual request)
+#   2. A PR check fails with analysis errors (auto-trigger via pull_request_review)
+
+on:
+  pull_request:
+    types: [labeled]
+
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to fix lint errors on'
+        required: true
+        type: string
+      target_repo:
+        description: 'Target repo (e.g., qltechin/app)'
+        required: true
+        type: string
+
+jobs:
+  fix-lint:
+    name: Fix Lint Errors on PR
+    runs-on: ubuntu-latest
+    # Trigger on 'aifixlint' label OR manual dispatch
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'aifixlint'
+
+    steps:
+      - name: Checkout agents repo
+        uses: actions/checkout@v4
+
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ vars.GH_OWNER }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+
+      - name: Install GitHub CLI
+        run: |
+          type -p gh > /dev/null || (
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg &&
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null &&
+            sudo apt update && sudo apt install gh -y
+          )
+          gh --version
+
+      - name: Install Codex CLI
+        run: |
+          npm install -g @openai/codex
+          codex --version || echo "codex installed"
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ai-agents@qltechin.github.io"
+          git config --global user.name "AI Agents"
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Resolve PR number and repo
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "pr_number=${{ inputs.pr_number }}" >> $GITHUB_OUTPUT
+            echo "target_repo=${{ inputs.target_repo }}" >> $GITHUB_OUTPUT
+          else
+            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+            echo "target_repo=${{ github.event.repository.full_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Builder Agent (lint-fix mode)
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_OWNER: ${{ vars.GH_OWNER }}
+          GH_ACCOUNT_TYPE: ${{ vars.GH_ACCOUNT_TYPE }}
+          GH_PROJECT_NUMBER: ${{ vars.GH_PROJECT_NUMBER }}
+          MONITORED_REPOS: ${{ vars.MONITORED_REPOS }}
+          GH_AGENTS_REPO_NAME: ${{ vars.GH_AGENTS_REPO_NAME }}
+          BUILDER_REPOS: ${{ vars.MONITORED_REPOS }}
+          CODE_AGENT_PROVIDER: ${{ vars.CODE_AGENT_PROVIDER || 'auto' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          VERBOSE: 'true'
+        run: |
+          python -m cli.main builder \
+            --target-repo "${{ steps.resolve.outputs.target_repo }}" \
+            --pr "${{ steps.resolve.outputs.pr_number }}" \
+            --verbose
+
+      - name: Remove aifixlint label after fix
+        if: github.event_name == 'pull_request' && github.event.label.name == 'aifixlint'
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh pr edit "${{ steps.resolve.outputs.pr_number }}" \
+            --repo "${{ steps.resolve.outputs.target_repo }}" \
+            --remove-label "aifixlint" || true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Lint Fix Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| PR | #${{ steps.resolve.outputs.pr_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Repo | ${{ steps.resolve.outputs.target_repo }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |" >> $GITHUB_STEP_SUMMARY

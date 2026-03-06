@@ -2549,3 +2549,178 @@ Stories will be auto-generated for new widgets at: `{config.widgetbook_stories_p
                     )
 
         return result
+
+    async def fix_pr_lint(self, repo: str, pr_number: int) -> dict[str, Any]:
+        """Fix lint/import errors on an existing PR branch.
+
+        Checks out the PR branch, runs the analyze command, feeds errors to
+        the code agent to fix them, then pushes back to the same branch.
+
+        Args:
+            repo: Repository name (e.g., "owner/app")
+            pr_number: Pull request number to fix
+
+        Returns:
+            dict with success, fixed (bool), errors_found, pr_url
+        """
+        import tempfile
+        import time
+
+        self.log(f"[LINT-FIX] Starting lint fix for PR #{pr_number} in {repo}")
+
+        work_dir = tempfile.mkdtemp(prefix=f"lint-fix-pr{pr_number}-")
+        container_id = None
+
+        try:
+            # Step 1: Get PR info (branch name)
+            pr_info_result = subprocess.run(
+                ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
+                 "headRefName,title,body,number,url"],
+                capture_output=True, text=True,
+            )
+            if pr_info_result.returncode != 0:
+                return {"success": False, "error": f"Could not fetch PR #{pr_number}: {pr_info_result.stderr}"}
+
+            pr_info = json.loads(pr_info_result.stdout)
+            branch_name = pr_info["headRefName"]
+            pr_url = pr_info["url"]
+            self.log(f"[LINT-FIX] PR branch: {branch_name}")
+
+            # Step 2: Clone repo at the PR branch
+            clone_result = subprocess.run(
+                ["git", "clone", "--depth", "1", "--branch", branch_name,
+                 f"https://github.com/{repo}.git", work_dir],
+                capture_output=True, text=True,
+            )
+            if clone_result.returncode != 0:
+                return {"success": False, "error": f"Clone failed: {clone_result.stderr}"}
+
+            # Step 3: Load repo config
+            config = self._load_repo_config(work_dir, repo)
+            self.log(f"[LINT-FIX] Project type: {config.type}")
+
+            analyze_cmd = config.analyze_command
+            if not analyze_cmd:
+                return {"success": False, "error": "No analyze_command configured for this repo"}
+
+            # Step 4: Run analyze to capture errors
+            self.log(f"[LINT-FIX] Running: {analyze_cmd}")
+            analyze_result = subprocess.run(
+                analyze_cmd, shell=True, cwd=work_dir,
+                capture_output=True, text=True, timeout=config.analyze_timeout,
+            )
+
+            combined_output = (analyze_result.stdout or "") + (analyze_result.stderr or "")
+            has_errors = analyze_result.returncode != 0 and "error" in combined_output.lower()
+
+            if not has_errors:
+                self.log("[LINT-FIX] No errors found — PR is already clean")
+                return {"success": True, "fixed": False, "errors_found": 0, "pr_url": pr_url}
+
+            # Truncate to avoid overwhelming the code agent
+            error_output = combined_output[:4000]
+            error_lines = [l for l in combined_output.splitlines() if "error" in l.lower()]
+            error_count = len(error_lines)
+            self.log(f"[LINT-FIX] Found {error_count} error line(s)")
+
+            # Step 5: Ask code agent to fix the errors
+            lint_fix_prompt = f"""You are fixing lint/static analysis errors in a {config.type} project.
+
+## Analyze Output (errors to fix)
+
+```
+{error_output}
+```
+
+## Instructions
+
+1. Read each error carefully and identify the root cause (missing import, wrong type, undefined variable, etc.)
+2. Fix ALL errors shown above — do NOT skip any
+3. Do NOT change any business logic or add new features
+4. After fixing, the `{analyze_cmd}` command must pass with zero errors
+5. Keep changes minimal — only touch what's needed to fix the errors
+
+Fix every error now.
+"""
+            from tools.code_agent import run_code_agent
+
+            agent_result = await run_code_agent(
+                work_dir=work_dir,
+                prompt=lint_fix_prompt,
+                settings=self.settings,
+                logger=self.log,
+            )
+            self.log(f"[LINT-FIX] Code agent done: {agent_result.get('files_changed', [])}")
+
+            # Step 6: Verify errors are fixed
+            verify_result = subprocess.run(
+                analyze_cmd, shell=True, cwd=work_dir,
+                capture_output=True, text=True, timeout=config.analyze_timeout,
+            )
+            still_has_errors = (
+                verify_result.returncode != 0
+                and "error" in ((verify_result.stdout or "") + (verify_result.stderr or "")).lower()
+            )
+
+            if still_has_errors:
+                self.log("[LINT-FIX] Errors remain after fix attempt", level="warning")
+                remaining = ((verify_result.stdout or "") + (verify_result.stderr or ""))[:2000]
+            else:
+                self.log("[LINT-FIX] All errors fixed!")
+                remaining = ""
+
+            # Step 7: Commit and push any changes
+            git_status = subprocess.run(
+                ["git", "status", "--porcelain"], cwd=work_dir, capture_output=True, text=True,
+            )
+            has_uncommitted = bool(git_status.stdout.strip())
+
+            if has_uncommitted:
+                subprocess.run(["git", "add", "-A"], cwd=work_dir, capture_output=True)
+                subprocess.run(
+                    ["git", "commit", "-m", "fix: resolve lint and import errors"],
+                    cwd=work_dir, capture_output=True,
+                )
+
+            push_result = subprocess.run(
+                ["git", "push", "origin", branch_name],
+                cwd=work_dir, capture_output=True, text=True,
+            )
+            if push_result.returncode != 0:
+                self.log(f"[LINT-FIX] Push failed: {push_result.stderr}", level="warning")
+
+            # Step 8: Post comment on PR
+            if still_has_errors:
+                comment = (
+                    f"🔧 **AI Lint Fix Attempted**\n\n"
+                    f"Found {error_count} error(s) and attempted to fix them, but some errors remain.\n\n"
+                    f"**Remaining errors:**\n```\n{remaining}\n```\n\n"
+                    f"Manual review required."
+                )
+            else:
+                fixed_files = agent_result.get("files_changed", [])
+                comment = (
+                    f"✅ **AI Lint Fix Applied**\n\n"
+                    f"Fixed {error_count} `{analyze_cmd}` error(s).\n"
+                    + (f"Files updated: {', '.join(fixed_files)}\n" if fixed_files else "")
+                    + f"\nAnalysis now passes with zero errors."
+                )
+
+            subprocess.run(
+                ["gh", "pr", "comment", str(pr_number), "--repo", repo, "--body", comment],
+                capture_output=True,
+            )
+
+            return {
+                "success": True,
+                "fixed": not still_has_errors,
+                "errors_found": error_count,
+                "pr_url": pr_url,
+            }
+
+        except Exception as e:
+            self.log(f"[LINT-FIX] Failed: {e}", level="error")
+            return {"success": False, "error": str(e)}
+
+        finally:
+            await self._cleanup(container_id, work_dir)

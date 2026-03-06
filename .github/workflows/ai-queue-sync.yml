@@ -7,7 +7,7 @@ name: AI Queue Sync
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Every hour
+    - cron: '*/5 * * * *'  # Every 5 minutes
 
   workflow_dispatch:
     inputs:
@@ -20,6 +20,10 @@ on:
         required: false
         type: boolean
         default: false
+
+  # NOTE: projects_v2_item event is NOT supported for user-owned projects
+  # (https://github.com/users/qltechin/projects/1). It only fires for org projects.
+  # Removed to avoid confusion — cron handles sync instead.
 
   issues:
     types: [labeled, unlabeled]

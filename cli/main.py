@@ -524,6 +524,12 @@ def builder(
         "-i",
         help="Specific issue number to process (requires --target-repo)",
     ),
+    fix_pr: int | None = typer.Option(
+        None,
+        "--pr",
+        "-p",
+        help="Fix lint/import errors on an existing PR (requires --target-repo)",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -555,6 +561,31 @@ def builder(
     settings.verbose = verbose
 
     console.print("[bold blue]Builder Agent[/bold blue]")
+
+    # --- PR lint-fix mode ---
+    if fix_pr is not None:
+        if not target_repo:
+            console.print("[red]Error: --target-repo is required when using --pr[/red]")
+            raise typer.Exit(1)
+        console.print(f"Mode: Fix lint errors on PR #{fix_pr} in {target_repo}")
+        console.print()
+
+        agent = BuilderAgent(settings=settings, target_repo=target_repo)
+        lint_result = run_async(agent.fix_pr_lint(repo=target_repo, pr_number=fix_pr))
+
+        if lint_result.get("success"):
+            if lint_result.get("fixed"):
+                console.print(f"[green]Fixed {lint_result.get('errors_found', 0)} error(s)[/green]")
+            else:
+                console.print("[yellow]No errors found — PR is already clean[/yellow]")
+            if lint_result.get("pr_url"):
+                console.print(f"PR: {lint_result['pr_url']}")
+        else:
+            console.print(f"[red]Error: {lint_result.get('error', 'Unknown error')}[/red]")
+            raise typer.Exit(1)
+        return
+
+    # --- Normal issue-processing mode ---
     console.print(f"Max issues: {max_issues}")
     console.print(f"Parallel: {parallel} (max concurrent: {max_concurrent}, repo-lock: {repo_lock})")
     if target_repo:

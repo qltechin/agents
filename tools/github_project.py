@@ -374,8 +374,8 @@ class GitHubProjectClient:
 
         updates_made = 0
 
-        if success and pr_url:
-            if self.update_item_field(project_number, item.item_id, "Status", "In Review"):
+        if success:
+            if self.update_item_field(project_number, item.item_id, "Status", "In Testing"):
                 updates_made += 1
         elif not success:
             if self.update_item_field(project_number, item.item_id, "Status", "AI Failed"):
