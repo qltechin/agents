@@ -530,6 +530,11 @@ def builder(
         "-p",
         help="Fix lint/import errors on an existing PR (requires --target-repo)",
     ),
+    comment: str | None = typer.Option(
+        None,
+        "--comment",
+        help="Apply changes from this comment to the existing PR for the issue (requires --target-repo and --issue-number)",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -561,6 +566,28 @@ def builder(
     settings.verbose = verbose
 
     console.print("[bold blue]Builder Agent[/bold blue]")
+
+    # --- PR iteration mode (apply comment feedback to existing PR) ---
+    if comment is not None:
+        if not target_repo or not issue_number:
+            console.print("[red]Error: --target-repo and --issue-number are required when using --comment[/red]")
+            raise typer.Exit(1)
+        console.print(f"Mode: Iterate on PR for issue #{issue_number} in {target_repo}")
+        console.print(f"Feedback: {comment[:100]}...")
+        console.print()
+
+        agent = BuilderAgent(settings=settings, target_repo=target_repo)
+        iter_result = run_async(agent.iterate_pr(repo=target_repo, issue_number=issue_number, comment=comment))
+
+        if iter_result.get("success"):
+            console.print(f"[green]PR updated successfully[/green]")
+            console.print(f"PR: {iter_result.get('pr_url')}")
+            if iter_result.get("files_changed"):
+                console.print(f"Files changed: {', '.join(iter_result['files_changed'][:5])}")
+        else:
+            console.print(f"[red]Error: {iter_result.get('error', 'Unknown error')}[/red]")
+            raise typer.Exit(1)
+        return
 
     # --- PR lint-fix mode ---
     if fix_pr is not None:

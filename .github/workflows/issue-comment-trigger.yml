@@ -1,0 +1,82 @@
+name: Trigger Builder on Issue Comment
+
+# When a human comments on an issue that already has 'aicomplete' label,
+# dispatch the builder agent to apply the requested changes to the existing PR.
+#
+# IMPORTANT: This workflow must exist in BOTH repos:
+#   - qltechin/agents  (this file — fires for issues in the agents repo)
+#   - qltechin/app     (copy this file there — fires for issues in the app repo)
+#
+# Flow:
+#   1. Human comments on issue #N (which has 'aicomplete' label)
+#   2. This workflow fires, ignores bot comments
+#   3. Dispatches builder agent in iterate mode:
+#      builder --target-repo owner/app --issue-number N --comment "<comment text>"
+#   4. Builder finds the open PR, checks it out, applies the feedback, pushes
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  trigger-iterate:
+    name: Trigger PR Iteration
+    runs-on: ubuntu-latest
+    # Only fire when:
+    #   - The comment is on an ISSUE (not a PR)
+    #   - The commenter is not the AI bot itself (prevent loops)
+    #   - The issue has the 'aicomplete' label (builder already made a PR)
+    if: |
+      github.event.issue.pull_request == null &&
+      github.actor != 'qltechin-ai-agents' &&
+      github.actor != 'github-actions[bot]' &&
+      contains(toJson(github.event.issue.labels), 'aicomplete')
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ vars.GH_OWNER }}
+
+      - name: Dispatch builder agent (iterate mode)
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const issue = context.payload.issue;
+            const comment = context.payload.comment;
+            const repo = context.repo;
+            const ghOwner = '${{ vars.GH_OWNER }}';
+            const agentsRepo = '${{ vars.GH_AGENTS_REPO_NAME }}';
+
+            console.log(`Comment by ${comment.user.login} on ${repo.owner}/${repo.repo}#${issue.number}`);
+            console.log(`Comment: ${comment.body.substring(0, 200)}`);
+
+            // Dispatch to agents repo
+            await github.rest.actions.createWorkflowDispatch({
+              owner: ghOwner,
+              repo: agentsRepo,
+              workflow_id: 'on-demand-agent.yml',
+              ref: 'main',
+              inputs: {
+                agent: 'builder',
+                issue_number: String(issue.number),
+                target_repo: `${repo.owner}/${repo.repo}`,
+                comment: comment.body,
+                max_issues: '1',
+                verbose: 'true',
+              }
+            });
+
+            console.log(`Builder iterate workflow dispatched for issue #${issue.number}`);
+
+            // Acknowledge the comment with a reaction so the user knows it was picked up
+            await github.rest.reactions.createForIssueComment({
+              owner: repo.owner,
+              repo: repo.repo,
+              comment_id: comment.id,
+              content: 'eyes',
+            });

@@ -2724,3 +2724,224 @@ Fix every error now.
 
         finally:
             await self._cleanup(container_id, work_dir)
+
+    async def iterate_pr(
+        self, repo: str, issue_number: int, comment: str
+    ) -> dict[str, Any]:
+        """Apply changes requested in a comment to an existing AI-created PR.
+
+        Finds the open PR for the given issue, checks out its branch, builds
+        a prompt from the original issue + current PR diff + new comment,
+        runs the code agent, then pushes the result back to the same branch.
+
+        Args:
+            repo: Repository name (e.g., "owner/app")
+            issue_number: Issue number the comment was posted on
+            comment: The comment text describing requested changes
+
+        Returns:
+            dict with success, pr_url, files_changed
+        """
+        import tempfile
+
+        self.log(f"[ITERATE] Starting PR iteration for issue #{issue_number} in {repo}")
+        self.log(f"[ITERATE] Requested changes: {comment[:200]}")
+
+        work_dir = tempfile.mkdtemp(prefix=f"iterate-issue{issue_number}-")
+        container_id = None
+
+        try:
+            # Step 1: Fetch original issue details
+            issue_result = subprocess.run(
+                ["gh", "issue", "view", str(issue_number), "--repo", repo,
+                 "--json", "number,title,body,url,labels"],
+                capture_output=True, text=True,
+            )
+            if issue_result.returncode != 0:
+                return {"success": False, "error": f"Could not fetch issue #{issue_number}: {issue_result.stderr}"}
+            issue_data = json.loads(issue_result.stdout)
+
+            # Step 2: Find the open PR for this issue
+            # Try branch naming convention: ai/fix-issue-{N} (possibly -v2, -v3 ...)
+            pr_result = subprocess.run(
+                ["gh", "pr", "list", "--repo", repo, "--state", "open",
+                 "--search", f"head:ai/fix-issue-{issue_number}",
+                 "--json", "number,headRefName,title,url"],
+                capture_output=True, text=True,
+            )
+            prs = json.loads(pr_result.stdout) if pr_result.stdout.strip() else []
+
+            # Fallback: search by "Closes #N" in PR body
+            if not prs:
+                pr_result2 = subprocess.run(
+                    ["gh", "pr", "list", "--repo", repo, "--state", "open",
+                     "--search", f"Closes #{issue_number}",
+                     "--json", "number,headRefName,title,url"],
+                    capture_output=True, text=True,
+                )
+                prs = json.loads(pr_result2.stdout) if pr_result2.stdout.strip() else []
+
+            if not prs:
+                return {
+                    "success": False,
+                    "error": (
+                        f"No open PR found for issue #{issue_number}. "
+                        "The builder agent must create a PR first."
+                    ),
+                }
+
+            # Use the most recent PR
+            pr = prs[-1]
+            branch_name = pr["headRefName"]
+            pr_url = pr["url"]
+            pr_number = pr["number"]
+            self.log(f"[ITERATE] Found PR #{pr_number} on branch: {branch_name}")
+
+            # Step 3: Clone repo at the PR branch
+            clone_result = subprocess.run(
+                ["git", "clone", "--depth", "50", "--branch", branch_name,
+                 f"https://github.com/{repo}.git", work_dir],
+                capture_output=True, text=True,
+            )
+            if clone_result.returncode != 0:
+                return {"success": False, "error": f"Clone failed: {clone_result.stderr}"}
+
+            # Fetch base branch for diffing
+            base_branch = "staging"
+            subprocess.run(["git", "fetch", "origin", base_branch], cwd=work_dir, capture_output=True)
+
+            # Step 4: Get the PR diff so the agent knows what was already done
+            diff_stat = subprocess.run(
+                ["git", "diff", f"origin/{base_branch}...HEAD", "--stat"],
+                cwd=work_dir, capture_output=True, text=True,
+            ).stdout.strip()
+
+            full_diff = subprocess.run(
+                ["git", "diff", f"origin/{base_branch}...HEAD",
+                 "--", "*.dart", "*.py", "*.ts", "*.tsx", "*.js", "*.go", "*.java", "*.kt"],
+                cwd=work_dir, capture_output=True, text=True,
+            ).stdout[:6000]
+
+            # Step 5: Load repo config
+            config = self._load_repo_config(work_dir, repo)
+            self.log(f"[ITERATE] Project type: {config.type}")
+
+            # Step 6: Build iteration prompt
+            iterate_prompt = f"""You are iterating on an existing AI-generated PR based on reviewer feedback.
+
+## Original Issue #{issue_data['number']}: {issue_data['title']}
+
+{issue_data.get('body', '(no description)')}
+
+## What Was Already Implemented (PR #{pr_number})
+
+Files changed so far:
+{diff_stat or '(see diff below)'}
+
+Current diff vs base branch:
+```diff
+{full_diff}
+```
+
+## Requested Changes (from issue comment)
+
+> {comment}
+
+## Instructions
+
+1. Read the existing diff carefully — understand what was already implemented
+2. Apply ONLY the changes described in the feedback above
+3. Do NOT revert or undo existing work — build on top of it
+4. Do NOT introduce new lint errors
+5. Keep changes minimal and focused on the requested feedback
+6. The codebase must compile/analyze cleanly after your changes
+
+Apply the requested changes now.
+"""
+
+            if config.type == "flutter":
+                semantic_section = self._build_semantic_enforcement_prompt(config)
+                if semantic_section:
+                    iterate_prompt += semantic_section
+
+            # Step 7: Run code agent
+            self.log("[ITERATE] Running code agent with feedback context...")
+            from tools.code_agent import run_code_agent
+
+            agent_result = await run_code_agent(
+                work_dir=work_dir,
+                prompt=iterate_prompt,
+                settings=self.settings,
+                logger=self.log,
+            )
+            files_changed = agent_result.get("files_changed", [])
+            self.log(f"[ITERATE] Code agent done, files changed: {files_changed}")
+
+            # Step 8: Run analyze to catch any new errors
+            if config.analyze_command:
+                self.log(f"[ITERATE] Running analyze: {config.analyze_command}")
+                analyze = subprocess.run(
+                    config.analyze_command, shell=True, cwd=work_dir,
+                    capture_output=True, text=True, timeout=config.analyze_timeout,
+                )
+                combined = (analyze.stdout or "") + (analyze.stderr or "")
+                if analyze.returncode != 0 and "error" in combined.lower():
+                    self.log(f"[ITERATE] Analyze errors:\n{combined[:500]}", level="warning")
+
+            # Step 9: Commit and push
+            git_status = subprocess.run(
+                ["git", "status", "--porcelain"], cwd=work_dir, capture_output=True, text=True,
+            )
+            has_uncommitted = bool(git_status.stdout.strip())
+
+            commits_ahead = subprocess.run(
+                ["git", "log", f"origin/{branch_name}..HEAD", "--oneline"],
+                cwd=work_dir, capture_output=True, text=True,
+            )
+            has_new_commits = bool(commits_ahead.stdout.strip())
+
+            if has_uncommitted:
+                subprocess.run(["git", "add", "-A"], cwd=work_dir, capture_output=True)
+                subprocess.run(
+                    ["git", "commit", "-m", f"feat: apply feedback from issue comment\n\n{comment[:200]}"],
+                    cwd=work_dir, capture_output=True,
+                )
+
+            if has_uncommitted or has_new_commits:
+                push_result = subprocess.run(
+                    ["git", "push", "origin", branch_name],
+                    cwd=work_dir, capture_output=True, text=True,
+                )
+                if push_result.returncode != 0:
+                    self.log(f"[ITERATE] Push failed: {push_result.stderr}", level="error")
+                    return {"success": False, "error": f"Push failed: {push_result.stderr}"}
+                self.log("[ITERATE] Changes pushed to PR branch")
+            else:
+                self.log("[ITERATE] No changes made by agent", level="warning")
+
+            # Step 10: Post confirmation comment on issue
+            changed_summary = (
+                "\n".join(f"- `{f}`" for f in files_changed[:10])
+                if files_changed
+                else "- (changes committed directly by agent)"
+            )
+            reply = (
+                f"🔄 **AI updated PR #{pr_number}** based on your feedback\n\n"
+                f"**Feedback applied:**\n> {comment[:300]}\n\n"
+                f"**Files updated:**\n{changed_summary}\n\n"
+                f"**PR:** {pr_url}\n\n"
+                f"Review the latest changes on branch `{branch_name}`."
+            )
+            subprocess.run(
+                ["gh", "issue", "comment", str(issue_number), "--repo", repo, "--body", reply],
+                capture_output=True,
+            )
+
+            return {"success": True, "pr_url": pr_url, "pr_number": pr_number, "files_changed": files_changed}
+
+        except Exception as e:
+            self.log(f"[ITERATE] Failed: {e}", level="error")
+            return {"success": False, "error": str(e)}
+
+        finally:
+            await self._cleanup(container_id, work_dir)
