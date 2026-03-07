@@ -118,6 +118,7 @@ jobs:
       - name: Run Agent
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_PAT: ${{ secrets.GH_PAT }}
           GH_OWNER: ${{ vars.GH_OWNER }}
           GH_ACCOUNT_TYPE: ${{ vars.GH_ACCOUNT_TYPE }}
           GH_PROJECT_NUMBER: ${{ vars.GH_PROJECT_NUMBER }}
