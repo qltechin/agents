@@ -27,6 +27,7 @@ async def run_code_agent(
     prompt: str,
     settings,
     logger=None,
+    max_turns: int = 60,
 ) -> dict:
     """
     Run the configured code agent to resolve a coding issue.
@@ -75,6 +76,7 @@ async def run_code_agent(
             api_key=api_key,
             logger=logger,
             model=model,
+            max_turns=max_turns,
         )
 
     elif provider == "deepseek":
@@ -92,6 +94,7 @@ async def run_code_agent(
             api_key=api_key,
             logger=logger,
             model=model,
+            max_turns=max_turns,
         )
 
     elif provider == "codex":
